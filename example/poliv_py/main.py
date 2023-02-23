@@ -4,12 +4,18 @@ from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QWidget, QApplication,
 import os
 from PyQt5 import uic, QtGui
 import OPi.GPIO as GPIO
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QDateTime
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QDateTime, QPoint, QRect
+from PyQt5.QtGui import QPainter, QColor, QBrush, QPixmap, QPen
 from BME280 import *
-import datetime
+from datetime import datetime
 import re
 import requests
 import json
+
+
+# TODO:
+# разделить http и каунтер проверки лампы
+
 
 
 GPIO.setboard(GPIO.ZERO)  # Orange Pi Zero board
@@ -33,6 +39,10 @@ class Settings():
     NOW_TEMPERATURE = ''
     COUNTER_BPM_280 = 2 # Как часто будет restart
     COUNTER_HTTP = 600 # Как часто будет restart, переопрос OpenWeather - не часто...
+    TIME_START_LAMP = 8
+    TIME_FINISH_LAMP = 20
+    TIME_SHIFT = 5 # минут запаса
+    CPU_TEMP_FILE = "/sys/class/thermal/thermal_zone1/temp"
 
 
 class MainWidget(QWidget):
@@ -43,7 +53,10 @@ class MainWidget(QWidget):
     def __init__(self):
         super().__init__()
         uic.loadUi('tab_ui.ui', self)
-        #self.label_2.setText()
+        screen_width = QApplication.instance().desktop().availableGeometry().width()
+        screen_height = QApplication.instance().desktop().availableGeometry().height()
+        print(screen_width,'*',screen_height)
+        self.setGeometry(0, 0, screen_width, screen_height)
         self.default_hum = 50
         self.labelNeedHum.setText(str(self.default_hum))
         self.pushButton_2.clicked.connect(self.returnOK)
@@ -75,6 +88,10 @@ class MainWidget(QWidget):
 
         self.getMeasures()
         self.httpRequestOpenWeather()
+        #
+        self.tabWidget.currentChanged.connect(self.barClickEvent)
+        # Потом сделать true!
+        self.may_draw = False
 
     def showCounter(self):
         if self.startWatch:
@@ -112,11 +129,10 @@ class MainWidget(QWidget):
             self.labelLed.setPixmap(QtGui.QPixmap(self.iconFiles['red']))
             #print("off!")
 
-        cpu_temp_file = open("/sys/class/thermal/thermal_zone1/temp")
+        cpu_temp_file = open(Settings.CPU_TEMP_FILE)
         cpu_temp = cpu_temp_file.read()
         cpu_temp_file.close()
-        self.labelCurCPU.setText(str(cpu_temp))
-        #print("get values: ", self.temperature,' ', self.humidity,' ', self.pressure, ' ', cpu_temp)
+        self.labelCurCPU.setText(str(round(int(cpu_temp), 1))) # такая конструкция, чтобы число вертикально было!
 
     def httpRequestOpenWeather(self):
         header = {"Content-type": "text/plain",
@@ -134,6 +150,118 @@ class MainWidget(QWidget):
             Settings.TODAY_SUNRISE_UNIX = jsonData['sys']['sunrise']
             Settings.TODAY_SUNSET_UNIX = jsonData['sys']['sunset']
             self.labelCurWeatherTemp.setText(str(Settings.NOW_TEMPERATURE))
+            self.may_draw = True
+
+        if(Settings.NOW_DATE_UNIX):
+            datetime_object = datetime.fromtimestamp(Settings.NOW_DATE_UNIX)
+            start_day = datetime_object.replace(second=0, microsecond=0, minute=0, hour=0)
+            start_day_UNIX = int(start_day.timestamp())
+            finish_day = datetime_object.replace(second=59, microsecond=999999, minute=59, hour=23)
+            finish_day_UNIX = int(finish_day.timestamp())
+
+            time_sunrise_str = datetime.fromtimestamp(Settings.TODAY_SUNRISE_UNIX).strftime('%H:%M')
+            time_sunset_str = datetime.fromtimestamp(Settings.TODAY_SUNSET_UNIX).strftime('%H:%M')
+            cur_date = datetime.fromtimestamp(Settings.NOW_DATE_UNIX).strftime('%d.%m.%Y')
+            self.labelSunrise.setText(str(time_sunrise_str))
+            self.labelSunset.setText(str(time_sunset_str))
+            self.labelDate.setText(str(cur_date))
+            #print(time_sunrise_str, time_sunset_str, " -=- " , datetime_object, '-----', start_day_UNIX, finish_day_UNIX)
+            self.lightUp()
+            #self.drawLightTime()
+
+    def lightUp(self):
+
+        # определяем, нужно ли включать свет!
+        light = False
+
+        datetime_now = datetime.fromtimestamp(Settings.NOW_DATE_UNIX)
+        now_ts = int(datetime_now.timestamp())
+
+        hour_8 = datetime_now.replace(second=0, microsecond=0, minute=0, hour=Settings.TIME_START_LAMP)
+        hour_8_UNIX = int(hour_8.timestamp())
+        hour_20 = datetime_now.replace(second=0, microsecond=0, minute=0, hour=Settings.TIME_FINISH_LAMP)
+        hour_20_UNIX = int(hour_20.timestamp())
+
+        if( ( (now_ts > hour_8_UNIX)  and (now_ts < hour_20_UNIX) ) \
+            and ( (now_ts < (Settings.TODAY_SUNRISE_UNIX + Settings.TIME_SHIFT*60)) \
+            or \
+            (now_ts > (Settings.TODAY_SUNSET_UNIX - Settings.TIME_SHIFT * 60)) ) ):
+            light = True
+
+        print( datetime_now, '-now_ts LIGHT: ', light)
+        return light
+
+    def barClickEvent(self):
+        # 0 - General
+        # 1 - Weather
+        self.may_draw = False
+        currentTab = self.tabWidget.currentIndex()
+
+        if currentTab == 0:
+            self.may_draw = True
+
+
+
+    def paintEvent(self, e):
+        if self.may_draw == True:
+
+            pixmap = QPixmap(self.labelDraw.size())
+            pixmap.fill(Qt.white)
+            painter = QPainter(pixmap)
+            painter.begin(self)
+
+            hours = 24
+            seconds = 86400
+            ### Рисуем утренний и вечерний запрет!
+            morning_end_pixels = int((Settings.TIME_START_LAMP * self.labelDraw.width()) / hours)
+            evening_start_pixels = int(((hours - Settings.TIME_FINISH_LAMP) * self.labelDraw.width()) / hours)
+
+            painter.setPen(QColor(100,102,100,150))
+            brush = QBrush(QColor(100,102,100,150))
+            painter.setBrush(brush)
+            painter.drawRect(0, 0, morning_end_pixels, self.labelDraw.height())
+            painter.drawRect(self.labelDraw.width() - evening_start_pixels, 0, self.labelDraw.width(), self.labelDraw.height())
+            ###
+
+            ### Рисуем сейчас!
+            datetime_now = datetime.fromtimestamp(Settings.NOW_DATE_UNIX)
+            now_ts = int(datetime_now.timestamp())
+            hour_0 = datetime_now.replace(second=0, microsecond=0, minute=0, hour=0)
+            hour_0_UNIX = int(hour_0.timestamp())
+            delta_seconds = (now_ts  - hour_0_UNIX)
+            now_pixels = (delta_seconds * self.labelDraw.width()) / seconds
+            painter.setPen(QPen(QColor(0, 165, 80), 4, Qt.SolidLine))
+            painter.drawLine(now_pixels, 0, now_pixels, self.labelDraw.height())
+            ###
+
+            ### Рисуем рассветы и закаты если нужны!
+            hour_8 = datetime_now.replace(second=0, microsecond=0, minute=0, hour=Settings.TIME_START_LAMP)
+            hour_8_UNIX = int(hour_8.timestamp())
+            hour_20 = datetime_now.replace(second=0, microsecond=0, minute=0, hour=Settings.TIME_FINISH_LAMP)
+            hour_20_UNIX = int(hour_20.timestamp())
+
+            if (Settings.TODAY_SUNSET_UNIX - Settings.TIME_SHIFT * 60) < hour_20_UNIX:
+                seconds_to_sunset_pixels = int(((Settings.TODAY_SUNSET_UNIX - Settings.TIME_SHIFT * 60) - hour_0_UNIX) * self.labelDraw.width() / seconds)
+                fin = int((Settings.TIME_FINISH_LAMP * self.labelDraw.width()) / hours)
+                painter.setPen(QColor(153, 0, 122, 90))
+                brush = QBrush(QColor(153,0,122,90))
+                painter.setBrush(brush)
+                painter.drawRect(seconds_to_sunset_pixels, 0, fin - seconds_to_sunset_pixels, self.labelDraw.height())
+
+            if (Settings.TODAY_SUNRISE_UNIX + Settings.TIME_SHIFT*60) > hour_8_UNIX:
+                seconds_from_sunrise_pixels = int(((Settings.TODAY_SUNRISE_UNIX + Settings.TIME_SHIFT*60) - hour_0_UNIX) * self.labelDraw.width() / seconds)
+                strt = int((Settings.TIME_START_LAMP * self.labelDraw.width()) / hours)
+                painter.setPen(QColor(153, 0, 122, 90))
+                brush = QBrush(QColor(153,0,122,90))
+                painter.setBrush(brush)
+                painter.drawRect(strt, 0, seconds_from_sunrise_pixels - strt, self.labelDraw.height())
+            ###
+
+            painter.end()
+
+            self.labelDraw.setPixmap(pixmap)
+            self.may_draw = False
+
 
     def hum_change(self, value):
 
@@ -162,6 +290,8 @@ class MainWidget(QWidget):
     def returnSOME(self):
         print(GPIO.input(s1), GPIO.input(s2))
 
+    def closeEvent(self, event):
+        GPIO.cleanup()
 
 if __name__ == '__main__':
 
