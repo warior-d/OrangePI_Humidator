@@ -23,9 +23,13 @@ GPIO.setmode(GPIO.SOC)  # set up SOC numbering
 s1 = GPIO.PA + 10#10
 s2 = GPIO.PA + 20#20
 key = GPIO.PA + 9#9
+hum_pin = GPIO.PA + 6
+light_pin = GPIO.PA + 7
 GPIO.setup(s1, GPIO.IN)
 GPIO.setup(s2, GPIO.IN)
 GPIO.setup(key, GPIO.IN)
+GPIO.setup(hum_pin, GPIO.OUT)
+GPIO.setup(light_pin, GPIO.OUT)
 
 class Settings():
     URL_OPNWTHR = 'https://api.openweathermap.org/data/2.5/weather?lat={}&lon={}&appid={}'
@@ -92,6 +96,9 @@ class MainWidget(QWidget):
         self.tabWidget.currentChanged.connect(self.barClickEvent)
         # Потом сделать true!
         self.may_draw = False
+        #
+        self.humi_pin_status = False
+        self.light_pin_status = False
 
     def showCounter(self):
         if self.startWatch:
@@ -123,16 +130,26 @@ class MainWidget(QWidget):
         self.labelCurHum.setText(str(round(self.humidity, 1)))
         if( self.humidity <= (self.default_hum - self.husterezis) ):
             self.labelLed.setPixmap(QtGui.QPixmap(self.iconFiles['green']))
-            #print("on!")
+            self.setHumidity('ON')
 
         if( self.humidity >= self.default_hum ):
             self.labelLed.setPixmap(QtGui.QPixmap(self.iconFiles['red']))
-            #print("off!")
+            self.setHumidity('OFF')
 
         cpu_temp_file = open(Settings.CPU_TEMP_FILE)
         cpu_temp = cpu_temp_file.read()
         cpu_temp_file.close()
         self.labelCurCPU.setText(str(round(int(cpu_temp), 1))) # такая конструкция, чтобы число вертикально было!
+
+    def setHumidity(self, state):
+        currentState = GPIO.input(hum_pin)
+        if state == 'ON' and currentState == 0:
+            GPIO.output(hum_pin, 1)
+            print('HUM ON PIN!')
+
+        if state == 'OFF' and currentState == 1:
+            GPIO.output(hum_pin, 0)
+            print('HUM OFF PIN!')
 
     def httpRequestOpenWeather(self):
         header = {"Content-type": "text/plain",
@@ -173,6 +190,7 @@ class MainWidget(QWidget):
 
         # определяем, нужно ли включать свет!
         light = False
+        currentStateLight = GPIO.input(light_pin)
 
         datetime_now = datetime.fromtimestamp(Settings.NOW_DATE_UNIX)
         now_ts = int(datetime_now.timestamp())
@@ -187,6 +205,14 @@ class MainWidget(QWidget):
             or \
             (now_ts > (Settings.TODAY_SUNSET_UNIX - Settings.TIME_SHIFT * 60)) ) ):
             light = True
+
+        if light == True and currentStateLight == 0:
+            GPIO.output(light_pin, 1)
+            print('LIGHT ON PIN!')
+
+        if light == False and currentStateLight == 1:
+            GPIO.output(light_pin, 0)
+            print('LIGHT OFF PIN!')
 
         print( datetime_now, '-now_ts LIGHT: ', light)
         return light
